@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower::util::Either;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InputSchema {
@@ -18,7 +16,7 @@ pub struct Subject {
     pub schema: String,
 }
 pub type SharedState = Arc<RwLock<AppState>>;
-pub fn initializeState() -> SharedState {
+pub fn initialize_state() -> SharedState {
     // We suppose that the map is init using external data.
     let mut schemas_by_id: HashMap<i32, Subject> = HashMap::new();
     schemas_by_id.insert(

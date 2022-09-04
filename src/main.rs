@@ -1,26 +1,43 @@
 use axum::{
-    error_handling::HandleErrorLayer, extract, extract::*, http::StatusCode,
-    response::IntoResponse, routing::get, Router,
+    error_handling::HandleErrorLayer, extract::*, http::StatusCode, response::IntoResponse,
+    routing::get, Router,
 };
 use axum_macros::debug_handler;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer};
 use serde_json::json;
-use std::borrow::Borrow;
-use std::ops::Deref;
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use crate::domain::{InputSchema, SharedState, Subject};
+use crate::domain::{InputSchema, SharedState};
 use tower::{BoxError, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub mod domain;
 
+enum VersionParam {
+    Version(u32),
+    Latest,
+}
+impl<'de> Deserialize<'de> for VersionParam {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer);
+        match s {
+            Ok(text) => match text.as_str() {
+                "latest" => Ok(VersionParam::Latest),
+                text => match text.parse::<u32>() {
+                    Ok(id) => Ok(VersionParam::Version(id)),
+                    Err(_e) => Err(de::Error::custom(format!(
+                        "Could not parse request param `version`. Expected positive numer or \"latest\", got: \"{text}\""
+                    ))),
+                },
+            },
+            Err(e) => Err(e),
+        }
+    }
+}
 async fn get_subject_versions(
     Path(subject): Path<String>,
     State(data): State<SharedState>,
@@ -32,6 +49,16 @@ async fn get_subject_versions(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(versions))
+}
+#[debug_handler]
+async fn get_schema_by_subject_and_version(
+    Path((subject, version)): Path<(String, VersionParam)>,
+    State(data): State<SharedState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    match version {
+        VersionParam::Version(id) => Ok(Json(id.to_string())),
+        VersionParam::Latest => Ok(Json("Latest".to_string())),
+    }
 }
 
 async fn get_subject_by_id(
@@ -65,7 +92,10 @@ async fn register_subject_version(
                 "id": next_id,
             })),
         ),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        ),
     }
 }
 
@@ -79,15 +109,18 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let shared = domain::initializeState();
+    let shared = domain::initialize_state();
     let app = Router::with_state(Arc::clone(&shared))
         .route(
             "/subjects/:subject/versions",
             get(get_subject_versions).post(register_subject_version),
         )
+        .route(
+            "/subjects/:subject/versions/:version",
+            get(get_schema_by_subject_and_version),
+        )
         .route("/schemas/:id", get(get_subject_by_id))
         .route("/subjects", get(list_subjects))
-        //.route("/subjects/:subject/versions/:version", get())
         // Add middleware to all routes
         .layer(
             ServiceBuilder::new()
