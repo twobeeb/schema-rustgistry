@@ -9,6 +9,7 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.68"
 axum = "0.6.0-rc.1"
+axum-macros= "0.3.0-rc.1"
 tokio = { version = "1.0", features = ["full"] }
 tower = { version = "0.4", features = ["util", "timeout", "load-shed", "limit"] }
 tower-http = { version = "0.3.0", features = ["add-extension", "auth", "compression-full", "trace"] }

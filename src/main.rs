@@ -1,49 +1,37 @@
 use axum::{
-    error_handling::HandleErrorLayer,
-    extract::{Path, State},
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
+    error_handling::HandleErrorLayer, extract, extract::*, http::StatusCode,
+    response::IntoResponse, routing::get, Router,
 };
+use axum_macros::debug_handler;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use serde_json::json;
+use std::borrow::Borrow;
+use std::ops::Deref;
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, RwLock},
     time::Duration,
 };
+
+use crate::domain::{InputSchema, SharedState, Subject};
 use tower::{BoxError, ServiceBuilder};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Subject {
-    id: i32,
-    name: String,
-    version: i32,
-    schema: String,
-}
+pub mod domain;
 
-struct AppState {
-    schemas_by_name: HashMap<String, Subject>,
-    schemas_by_id: HashMap<i32, Subject>,
-}
-type SharedState = Arc<RwLock<AppState>>;
-
-async fn get_subject_by_name(
-    Path(name): Path<String>,
+async fn get_subject_versions(
+    Path(subject): Path<String>,
     State(data): State<SharedState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let s = data
+    let versions: Vec<i32> = data
         .read()
-        .unwrap()
-        .schemas_by_name
-        .get(name.as_str())
-        .cloned()
+        .await
+        .get_subject_versions(&subject)
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(s.clone()))
+
+    Ok(Json(versions))
 }
 
 async fn get_subject_by_id(
@@ -52,46 +40,33 @@ async fn get_subject_by_id(
 ) -> Result<impl IntoResponse, StatusCode> {
     let result = data
         .read()
-        .unwrap()
-        .schemas_by_id
-        .get(&id)
-        .cloned()
+        .await
+        .get_subject_by_id(id)
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(result))
 }
 
 async fn list_subjects(State(data): State<SharedState>) -> impl IntoResponse {
-    let subjects: Vec<Subject> = data
-        .read()
-        .unwrap()
-        .schemas_by_name
-        .values()
-        .cloned()
-        .collect();
+    let subjects: Vec<String> = data.read().await.list_subjects();
     (StatusCode::OK, Json(subjects))
 }
-
+#[debug_handler]
 async fn register_subject_version(
     Path(name): Path<String>,
-    //axum::extract::RawBody(schema): String,
     State(data): State<SharedState>,
+    Json(body): Json<InputSchema>,
 ) -> impl IntoResponse {
-    let name = name.to_string();
-    let mut state = data.write().unwrap();
+    let mut state = data.write().await;
 
-    let schema = "empty".to_string();
-
-    let next = state.schemas_by_id.keys().max().unwrap() + 1;
-    let subject = Subject {
-        id: next,
-        name: name.clone(),
-        version: 1,
-        schema: schema.clone(),
-    };
-    state.schemas_by_name.insert(name.clone(), subject.clone());
-    state.schemas_by_id.insert(next, subject.clone());
-
-    (StatusCode::CREATED, Json("New subejct registered: {name}!"))
+    match state.register_subject_version(name, body) {
+        Ok(next_id) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": next_id,
+            })),
+        ),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
+    }
 }
 
 #[tokio::main]
@@ -104,35 +79,15 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // We suppose that the map is init using external data.
-    let mut schemas_by_id: HashMap<i32, Subject> = HashMap::new();
-    schemas_by_id.insert(
-        0,
-        Subject {
-            id: 0,
-            name: "blublu".to_string(),
-            version: 1,
-            schema: "".to_string(),
-        },
-    );
-    let schemas_by_name: HashMap<String, Subject> = schemas_by_id
-        .clone()
-        .iter()
-        .map(|(_k, v)| (v.name.clone(), v.clone()))
-        .collect();
-
-    let app_state = AppState {
-        schemas_by_id: schemas_by_id.clone(),
-        schemas_by_name: schemas_by_name.clone(),
-    };
-    let shared = SharedState::new(RwLock::new(app_state));
+    let shared = domain::initializeState();
     let app = Router::with_state(Arc::clone(&shared))
         .route(
-            "/subjects/:name",
-            get(get_subject_by_name).post(register_subject_version),
+            "/subjects/:subject/versions",
+            get(get_subject_versions).post(register_subject_version),
         )
         .route("/schemas/:id", get(get_subject_by_id))
         .route("/subjects", get(list_subjects))
+        //.route("/subjects/:subject/versions/:version", get())
         // Add middleware to all routes
         .layer(
             ServiceBuilder::new()
@@ -153,20 +108,21 @@ async fn main() {
         .await
         .unwrap();
 }
+
 async fn handle_error(error: BoxError) -> impl IntoResponse {
     if error.is::<tower::timeout::error::Elapsed>() {
-        return (StatusCode::REQUEST_TIMEOUT, Cow::from("request timed out"));
+        return (StatusCode::REQUEST_TIMEOUT, "request timed out".to_string());
     }
 
     if error.is::<tower::load_shed::error::Overloaded>() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Cow::from("service is overloaded, try again later"),
+            "service is overloaded, try again later".to_string(),
         );
     }
 
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Cow::from(format!("Unhandled internal error: {}", error)),
+        format!("Unhandled internal error: {}", error).to_string(),
     )
 }
