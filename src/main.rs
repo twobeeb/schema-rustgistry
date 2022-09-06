@@ -14,7 +14,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub mod domain;
 
-enum VersionParam {
+pub enum VersionParam {
     Version(u32),
     Latest,
 }
@@ -23,26 +23,22 @@ impl<'de> Deserialize<'de> for VersionParam {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer);
-        match s {
-            Ok(text) => match text.as_str() {
-                "latest" => Ok(VersionParam::Latest),
-                text => match text.parse::<u32>() {
-                    Ok(id) => Ok(VersionParam::Version(id)),
-                    Err(_e) => Err(de::Error::custom(format!(
-                        "Could not parse request param `version`. Expected positive numer or \"latest\", got: \"{text}\""
-                    ))),
-                },
-            },
-            Err(e) => Err(e),
+        match String::deserialize(deserializer)?.to_lowercase().as_str() {
+            "latest" => Ok(VersionParam::Latest),
+            text => match text.parse::<u32>() {
+                Ok(id) => Ok(VersionParam::Version(id)),
+                Err(_e) => Err(de::Error::custom(format!(
+                    "Could not parse request param `version`. Expected positive int or \"latest\", got: \"{text}\""
+                ))),
+            }
         }
     }
 }
-async fn get_subject_versions(
+async fn list_subject_versions(
     Path(subject): Path<String>,
     State(data): State<SharedState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let versions: Vec<i32> = data
+    let versions: Vec<u32> = data
         .read()
         .await
         .get_subject_versions(&subject)
@@ -55,10 +51,12 @@ async fn get_schema_by_subject_and_version(
     Path((subject, version)): Path<(String, VersionParam)>,
     State(data): State<SharedState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    match version {
-        VersionParam::Version(id) => Ok(Json(id.to_string())),
-        VersionParam::Latest => Ok(Json("Latest".to_string())),
-    }
+    Ok(Json(
+        data.read()
+            .await
+            .get_subject_by_name_and_version(&subject, version)
+            .ok_or(StatusCode::NOT_FOUND)?,
+    ))
 }
 
 async fn get_subject_by_id(
@@ -113,7 +111,7 @@ async fn main() {
     let app = Router::with_state(Arc::clone(&shared))
         .route(
             "/subjects/:subject/versions",
-            get(get_subject_versions).post(register_subject_version),
+            get(list_subject_versions).post(register_subject_version),
         )
         .route(
             "/subjects/:subject/versions/:version",

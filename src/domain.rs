@@ -1,4 +1,6 @@
+use crate::VersionParam;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,7 +14,7 @@ pub struct InputSchema {
 pub struct Subject {
     pub id: i32,
     pub name: String,
-    pub version: i32,
+    pub version: u32,
     pub schema: String,
 }
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -51,12 +53,36 @@ pub struct AppState {
 }
 
 impl AppState {
-    fn get_schema(&self, name: &str) -> Option<Subject> {
-        //self.
-        None
+    pub fn get_subject_by_name_and_version(
+        &self,
+        name: &str,
+        version_param: VersionParam,
+    ) -> Option<Subject> {
+        match version_param {
+            VersionParam::Latest => Some(
+                self.schemas_by_name
+                    .get(name)?
+                    .into_iter()
+                    .max_by_key(|&x| x.version)?
+                    .clone(),
+            ),
+            VersionParam::Version(version) => {
+                let subject: Vec<&Subject> = self
+                    .schemas_by_name
+                    .get(name)?
+                    .into_iter()
+                    .filter(|x1| x1.version == version)
+                    .collect();
+                if subject.len() > 0 {
+                    Some(subject[0].clone())
+                } else {
+                    None
+                }
+            }
+        }
     }
-    pub fn get_subject_versions(&self, subject: &str) -> Option<Vec<i32>> {
-        let versions: Vec<i32> = self
+    pub fn get_subject_versions(&self, subject: &str) -> Option<Vec<u32>> {
+        let versions: Vec<u32> = self
             .schemas_by_name
             .get(subject)
             .unwrap()
