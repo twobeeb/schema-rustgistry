@@ -1,7 +1,10 @@
 use crate::VersionParam;
+use avro_rs::Schema;
+use md5::Digest;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::iter::Map;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,39 +20,33 @@ pub struct Subject {
     pub version: u32,
     pub schema: String,
 }
+pub type SubjectVersion = u32;
+pub type SubjectName = String;
+pub type SchemaId = i32;
+pub type SchemaIdAndSubjects = (SchemaId, HashMap<SubjectName, SubjectVersion>);
 pub type SharedState = Arc<RwLock<AppState>>;
 pub fn initialize_state() -> SharedState {
     // We suppose that the map is init using external data.
-    let mut schemas_by_id: HashMap<i32, Subject> = HashMap::new();
-    schemas_by_id.insert(
-        0,
-        Subject {
-            id: 0,
-            name: "blublu".to_string(),
-            version: 1,
-            schema: "".to_string(),
-        },
-    );
-    let schemas_by_name: HashMap<String, Vec<Subject>> = schemas_by_id
-        .clone()
-        .iter()
-        .map(|(_k, v)| {
-            let mut vec: Vec<Subject> = Vec::new();
-            vec.push(v.clone());
-            (v.name.clone(), vec)
-        })
-        .collect();
 
-    let app_state = AppState {
-        schemas_by_id: schemas_by_id.clone(),
-        schemas_by_name: schemas_by_name.clone(),
+    let mut app_state = AppState {
+        schemas_by_id: HashMap::new(),
+        schemas_by_name: HashMap::new(),
+        hashes: HashMap::new(),
     };
-    let shared = SharedState::new(RwLock::new(app_state));
-    shared
+    app_state
+        .register_subject_version(
+            "blublu",
+            InputSchema {
+                schema: "[\"long\"]".to_string(),
+            },
+        )
+        .expect("TODO: panic message");
+    SharedState::new(RwLock::new(app_state))
 }
 pub struct AppState {
     schemas_by_name: HashMap<String, Vec<Subject>>,
     schemas_by_id: HashMap<i32, Subject>,
+    hashes: HashMap<Digest, SchemaIdAndSubjects>,
 }
 
 impl AppState {
@@ -62,21 +59,21 @@ impl AppState {
             VersionParam::Latest => Some(
                 self.schemas_by_name
                     .get(name)?
-                    .into_iter()
-                    .max_by_key(|&x| x.version)?
+                    .iter()
+                    .max_by_key(|x| x.version)?
                     .clone(),
             ),
             VersionParam::Version(version) => {
                 let subject: Vec<&Subject> = self
                     .schemas_by_name
                     .get(name)?
-                    .into_iter()
+                    .iter()
                     .filter(|x1| x1.version == version)
                     .collect();
-                if subject.len() > 0 {
-                    Some(subject[0].clone())
-                } else {
+                if subject.is_empty() {
                     None
+                } else {
+                    Some(subject[0].clone())
                 }
             }
         }
@@ -84,35 +81,46 @@ impl AppState {
     pub fn get_subject_versions(&self, subject: &str) -> Option<Vec<u32>> {
         let versions: Vec<u32> = self
             .schemas_by_name
-            .get(subject)
-            .unwrap()
-            .into_iter()
+            .get(subject)?
+            .iter()
             .map(|s| s.version)
             .collect();
         Some(versions)
     }
     pub fn list_subjects(&self) -> Vec<String> {
-        self.schemas_by_name
-            .keys()
-            .into_iter()
-            .map(|x| x.clone())
-            .collect()
+        self.schemas_by_name.keys().into_iter().cloned().collect()
     }
     pub fn get_subject_by_id(&self, id: i32) -> Option<Subject> {
         Some(self.schemas_by_id.get(&id)?.clone())
     }
     pub fn register_subject_version(
         &mut self,
-        subject_name: String,
+        subject_name: &str,
         body: InputSchema,
-    ) -> Result<i32, &'static str> {
-        let next_schema_id = self
-            .schemas_by_id
-            .keys()
-            .max()
-            .and_then(|t| Some(t + 1))
-            .unwrap_or(1);
+    ) -> Result<i32, String> {
+        let parsed_schema = Schema::parse_str(body.schema.as_str())
+            .map_err(|e| format!("Schema could could be parsed: {e}"))?;
 
+        let md5 = md5::compute(parsed_schema.canonical_form());
+        match self.hashes.get(&md5) {
+            // Found Subjects, need to confirm same or new
+            Some(found) => {
+                match found.1.get(subject_name) {
+                    Some(s) => Ok(found.0),
+                    None => {
+                        let schema_id = found.0;
+                        self.register_subject_with_id(schema_id, subject_name.to_string(), body.schema, md5)
+                    }
+                }
+            },
+            // Create the schema
+            None => {
+                let next_schema_id = self.schemas_by_id.keys().max().map_or(1,|t| t + 1);
+                self.register_subject_with_id(next_schema_id, subject_name.to_string(), body.schema, md5)
+            }
+        }
+    }
+    fn register_subject_with_id(&mut self, schema_id: SchemaId, subject_name: SubjectName, schema: String, md5: Digest)->Result<i32, String>{
         let mut all_subject_versions = match self.schemas_by_name.get(&subject_name) {
             Some(x) => x.clone(),
             None => Vec::new(),
@@ -124,21 +132,28 @@ impl AppState {
             .unwrap_or(0)
             + 1;
         if new_version > 3 {
-            return Err("Sorry, 3 versions maximum");
+            return Err("Sorry, 3 versions maximum".to_string());
         }
 
         let subject = Subject {
-            id: next_schema_id,
+            id: schema_id,
             name: subject_name.clone(),
             version: new_version,
-            schema: body.schema.clone(),
+            schema,
         };
         all_subject_versions.push(subject.clone());
 
+
         // store back the updated state
+        let mut map: HashMap<SubjectName, SubjectVersion> = HashMap::new();
+        map.insert(subject_name.to_string(), new_version);
+
+
+        self.hashes.insert(md5,(schema_id, map));
+
         self.schemas_by_name
-            .insert(subject_name, all_subject_versions.clone());
-        self.schemas_by_id.insert(next_schema_id, subject.clone());
-        Ok(next_schema_id)
+            .insert(String::from(&subject_name), all_subject_versions.clone());
+        self.schemas_by_id.insert(schema_id, subject);
+        Ok(schema_id)
     }
 }

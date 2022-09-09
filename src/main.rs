@@ -1,10 +1,15 @@
 use axum::{
-    error_handling::HandleErrorLayer, extract::*, http::StatusCode, response::IntoResponse,
-    routing::get, Router,
+    error_handling::HandleErrorLayer,
+    extract::{Json, Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+    Router,
 };
 use axum_macros::debug_handler;
+use eyre::Result;
 use serde::{de, Deserialize, Deserializer};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::domain::{InputSchema, SharedState};
@@ -58,6 +63,22 @@ async fn get_schema_by_subject_and_version(
             .ok_or(StatusCode::NOT_FOUND)?,
     ))
 }
+async fn get_schema_string_by_subject_and_version(
+    Path((subject, version)): Path<(String, VersionParam)>,
+    State(data): State<SharedState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    Ok(Json(
+        data.read()
+            .await
+            .get_subject_by_name_and_version(&subject, version)
+            .map(|subject| {
+                let value: serde_json::Result<Value> =
+                    serde_json::from_str(subject.schema.as_str());
+                value.unwrap()
+            })
+            .ok_or(StatusCode::NOT_FOUND)?,
+    ))
+}
 
 async fn get_subject_by_id(
     Path(id): Path<i32>,
@@ -83,7 +104,7 @@ async fn register_subject_version(
 ) -> impl IntoResponse {
     let mut state = data.write().await;
 
-    match state.register_subject_version(name, body) {
+    match state.register_subject_version(name.as_str(), body) {
         Ok(next_id) => (
             StatusCode::CREATED,
             Json(json!({
@@ -116,6 +137,10 @@ async fn main() {
         .route(
             "/subjects/:subject/versions/:version",
             get(get_schema_by_subject_and_version),
+        )
+        .route(
+            "/subjects/:subject/versions/:version/schema",
+            get(get_schema_string_by_subject_and_version),
         )
         .route("/schemas/:id", get(get_subject_by_id))
         .route("/subjects", get(list_subjects))
@@ -154,6 +179,6 @@ async fn handle_error(error: BoxError) -> impl IntoResponse {
 
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("Unhandled internal error: {}", error).to_string(),
+        format!("Unhandled internal error: {}", error),
     )
 }
