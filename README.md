@@ -22,13 +22,13 @@ curl localhost:8080/subjects/subject2/versions -X POST -d '{"schema": "[\"long\"
 {"id":2}
 
 # Confirm version 1 and version 2
-curl localhost:8080/subjects/subject2/versions/2
+curl localhost:8080/subjects/subject2/versions/1
 {"id":1,"name":"subject2","version":1,"schema":"[\"string\"]"} 
 
-curl localhost:8080/subjects/blublu2/versions/2
+curl localhost:8080/subjects/subject2/versions/2
 {"id":2,"name":"subject2","version":2,"schema":"[\"long\"]"} 
 
 # Get schema
-curl localhost:8080/subjects/blublu2/versions/2/schema
+curl localhost:8080/subjects/subject2/versions/2/schema
 ["long"]
 ````
